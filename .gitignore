@@ -1,0 +1,23 @@
+# Arquivos temporários e de build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ambientes virtuais
+venv/
+env/
+.venv/
+
+# Arquivos de configuração locais
+.game_saves_config.json
+log.txt
+
+# Build e distribuição
+build/
+dist/
+*.egg-info/
+
+# Outros
+*.exe
+*.zip
