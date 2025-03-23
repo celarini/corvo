@@ -9,6 +9,8 @@ import logging
 from datetime import datetime
 from colorama import init, Fore, Style
 import keyboard
+import tkinter
+from tkinter.filedialog import askdirectory
 
 
 init()
@@ -17,6 +19,7 @@ init()
 CONFIG_FILE = "game_saves_config.json"
 MAX_ZIP_SIZE = 8 * 1024 * 1024  # 8 MB
 LOG_FILE = "log.txt"
+SAVE_FILE_EXTENSIONS = ('.sav', '.dat', '.json', '.ini', '.txt', '.cfg', '.profile', '.存档') # Add more extensions if needed
 
 # Config do logging
 logging.basicConfig(
@@ -27,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger()
 logger.handlers[0].stream = open(LOG_FILE, 'a')
 
-# Arte ASCII 
+# Arte ASCII
 BANNER_LINES = """
 ..---#+#++#+------++###########-----------+##
 ...--++#++#++---################+---------++#
@@ -80,11 +83,11 @@ PIRATE_CENSORED_LINES = [
 def generate_banner(webhook_status="", show_full_pirate=False):
     banner_lines = [line for line in BANNER_LINES.strip().splitlines() if line.strip()]
     pirate_lines = PIRATE_FULL_LINES if show_full_pirate else PIRATE_CENSORED_LINES
-    
+
     if webhook_status:
         status_line = f"{Fore.GREEN}Webhook: OK ✅{Style.RESET_ALL}"
         banner_lines[-2] = banner_lines[-2] + f"    {status_line}"
-    
+
     output = []
     for i in range(len(banner_lines)):
         art_line = f"{Fore.CYAN}{banner_lines[i]}{Style.RESET_ALL}"
@@ -108,12 +111,10 @@ def calculate_checksum(file_path):
 def get_file_size(file_path):
     return os.path.getsize(file_path)
 
-def select_directory():
-    from tkinter import Tk
-    from tkinter.filedialog import askdirectory
-    root = Tk()
+def select_directory(title="Selecione a pasta"):
+    root = tkinter.Tk()
     root.withdraw()
-    folder = askdirectory(title="Selecione a pasta dos saves")
+    folder = askdirectory(title=title)
     root.destroy()
     return folder
 
@@ -139,42 +140,60 @@ def save_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
 
+def calculate_directory_checksum(directory):
+    """Calcula o checksum SHA-256 de todos os arquivos em um diretório."""
+    sha256 = hashlib.sha256()
+    for root, _, files in os.walk(directory):
+        for file in sorted(files):
+            file_path = os.path.join(root, file)
+            try:
+                with open(file_path, "rb") as f:
+                    while True:
+                        data = f.read(65536)
+                        if not data:
+                            break
+                        sha256.update(data)
+            except Exception as e:
+                logging.error(f"Erro ao calcular checksum do arquivo {file_path}: {e}")
+    return sha256.hexdigest()
+
 def create_backup(game_name, save_dir):
     temp_dir = os.path.join(os.getenv("TEMP"), "GameSaves")
     os.makedirs(temp_dir, exist_ok=True)
-    
-    files = []
-    for file in os.listdir(save_dir):
-        file_path = os.path.join(save_dir, file)
-        if os.path.isfile(file_path):
-            files.append((file_path, os.path.getmtime(file_path)))
-    
-    files.sort(key=lambda x: x[1], reverse=True)
-    
-    
+
+    files_to_backup = []
+    for root, _, files in os.walk(save_dir): # Use os.walk to traverse subdirectories
+        for file in files:
+            file_path = os.path.join(root, file)
+            if os.path.isfile(file_path): # Double check it's a file (important with os.walk)
+                files_to_backup.append((file_path, os.path.getmtime(file_path)))
+
+    files_to_backup.sort(key=lambda x: x[1], reverse=True)
+
     current_checksum = calculate_directory_checksum(save_dir)
-    
+
     # Verificar  o checksum
     config = load_config()
     saved_checksum = config.get("games", {}).get(game_name, {}).get("checksum")
-    
+
     if saved_checksum == current_checksum:
         print(f"{Fore.YELLOW}[!]{Style.RESET_ALL} Nenhum backup necessário para {game_name} - arquivos não modificados")
         logging.info(f"Nenhum backup necessário para {game_name} - arquivos não modificados")
         return None
-    
-    
+
     zip_path = os.path.join(temp_dir, f"{game_name}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     total_size = 0
-    
+
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for file_path, _ in files:
+        for file_path, _ in files_to_backup: # Iterate over files found in subdirectories
             file_size = get_file_size(file_path)
             if total_size + file_size > MAX_ZIP_SIZE:
                 break
-            zipf.write(file_path, os.path.basename(file_path))
+            # Ensure we are writing the file inside the zip with a path relative to save_dir
+            arcname = os.path.relpath(file_path, save_dir)
+            zipf.write(file_path, arcname=arcname)
             total_size += file_size
-    
+
     # checksum no config
     if "games" not in config:
         config["games"] = {}
@@ -182,23 +201,9 @@ def create_backup(game_name, save_dir):
         config["games"][game_name] = {}
     config["games"][game_name]["checksum"] = current_checksum
     save_config(config)
-    
+
     logging.info(f"Backup criado: {zip_path}")
     return zip_path
-
-def calculate_directory_checksum(directory):
-    """Calcula o checksum SHA-256 de todos os arquivos em um diretório."""
-    sha256 = hashlib.sha256()
-    for root, _, files in os.walk(directory):
-        for file in sorted(files):
-            file_path = os.path.join(root, file)
-            with open(file_path, "rb") as f:
-                while True:
-                    data = f.read(65536)  
-                    if not data:
-                        break
-                    sha256.update(data)
-    return sha256.hexdigest()
 
 def send_to_discord(zip_path, webhook_url):
     try:
@@ -251,18 +256,18 @@ def game_management_menu():
     print(f"{Fore.YELLOW}Gerenciamento de Jogos{Style.RESET_ALL}")
     print("\nJogos configurados:")
     games = config.get("games", {})
-    
+
     for i, (name, details) in enumerate(games.items(), 1):
         print(f"{i}. {name} - Pasta: {details['save_dir']}")
-    
+
     print("\nOpções:")
     print(f"{Fore.GREEN}[a]{Style.RESET_ALL} Adicionar jogo")
     print(f"{Fore.RED}[r]{Style.RESET_ALL} Remover jogo")
     print(f"{Fore.YELLOW}[e]{Style.RESET_ALL} Editar jogo")
     print(f"{Fore.BLUE}[v]{Style.RESET_ALL} Voltar")
-    
+
     choice = input("\nSelecione uma opção: ").lower()
-    
+
     if choice == 'a':
         add_game()
     elif choice == 'r':
@@ -275,6 +280,38 @@ def game_management_menu():
         print("Opção inválida!")
         time.sleep(2)
 
+def suggest_save_directories(game_name):
+    """Suggests potential save directories based on common locations."""
+    user_home = os.path.expanduser("~")
+    paths = [
+        os.path.join(user_home, "Documents", "My Games"),
+        os.path.join(user_home, "Documents"),
+        os.path.join(user_home, "Saved Games"),
+        os.path.join(user_home, "AppData", "Local"),
+        os.path.join(user_home, "AppData", "Roaming"),
+        "C:\\Program Files (x86)\\Steam\\userdata", # Common Steam userdata path, adjust drive if needed
+        "D:\\Program Files (x86)\\Steam\\userdata", # Common Steam userdata path on D drive
+    ]
+    suggested_dirs = []
+    for path in paths:
+        if os.path.exists(path):
+            suggested_dirs.append(path)
+    return suggested_dirs
+
+def find_save_folder_by_name(game_name, search_path):
+    """Searches for save folders by game name within a given path."""
+    potential_folders = []
+    for root, dirs, files in os.walk(search_path):
+        for file in files:
+            if game_name.lower() in file.lower() and file.lower().endswith(SAVE_FILE_EXTENSIONS):
+                potential_folders.append(root)
+                break # Stop searching in this directory once a save file is found, to avoid duplicates from subfolders
+        for dirname in dirs:
+            if game_name.lower() in dirname.lower(): # Check directory names too
+                potential_folders.append(os.path.join(root, dirname))
+
+    return list(set(potential_folders)) # Remove duplicates
+
 def add_game():
     config = load_config()
     webhook_status = "OK" if config.get("discord_webhook") else ""
@@ -282,30 +319,81 @@ def add_game():
     print(generate_banner(webhook_status, show_full_pirate=False))
     print(f"{Fore.GREEN}Adicionar Novo Jogo{Style.RESET_ALL}")
     game_name = input("Digite o nome do jogo: ")
-    save_dir = select_directory()
-    
+
+    print("\nOpções de detecção da pasta de saves:")
+    print(f"{Fore.GREEN}[1]{Style.RESET_ALL} Selecionar pasta manualmente")
+    print(f"{Fore.GREEN}[2]{Style.RESET_ALL} Buscar automaticamente")
+
+    detection_choice = input("Selecione a opção de detecção: ")
+
+    if detection_choice == '2':
+        print(f"\n{Fore.YELLOW}Buscando automaticamente pastas de save para '{game_name}'...{Style.RESET_ALL}")
+        suggested_directories_list = suggest_save_directories(game_name)
+        found_folders = []
+
+        for search_dir in suggested_directories_list:
+             found_folders.extend(find_save_folder_by_name(game_name, search_dir))
+
+        if found_folders:
+            print(f"\n{Fore.CYAN}Pastas de save potenciais encontradas:{Style.RESET_ALL}")
+            for i, folder in enumerate(found_folders):
+                print(f"{Fore.GREEN}[{i+1}]{Style.RESET_ALL} {folder}")
+
+            print(f"{Fore.YELLOW}[0]{Style.RESET_ALL} Selecionar pasta manualmente") # Option to manually select even if auto-detect found folders
+
+            folder_choice = input("\nSelecione o número da pasta ou '0' para manual: ")
+            if folder_choice == '0':
+                save_dir = select_directory(title=f"Selecione a pasta de saves para {game_name}")
+            else:
+                try:
+                    chosen_index = int(folder_choice) - 1
+                    if 0 <= chosen_index < len(found_folders):
+                        save_dir = found_folders[chosen_index]
+                    else:
+                        print(f"{Fore.RED}Opção inválida. Selecionando pasta manualmente.{Style.RESET_ALL}")
+                        save_dir = select_directory(title=f"Selecione a pasta de saves para {game_name}")
+                except ValueError:
+                    print(f"{Fore.RED}Entrada inválida. Selecionando pasta manualmente.{Style.RESET_ALL}")
+                    save_dir = select_directory(title=f"Selecione a pasta de saves para {game_name}")
+
+        else:
+            print(f"{Fore.YELLOW}Nenhuma pasta de save automática encontrada. Selecione manualmente.{Style.RESET_ALL}")
+            save_dir = select_directory(title=f"Selecione a pasta de saves para {game_name}")
+
+    elif detection_choice == '1':
+        save_dir = select_directory(title=f"Selecione a pasta de saves para {game_name}")
+    else:
+        print(f"{Fore.RED}Opção inválida. Selecionando pasta manualmente.{Style.RESET_ALL}")
+        save_dir = select_directory(title=f"Selecione a pasta de saves para {game_name}")
+
+
     if "games" not in config:
         config["games"] = {}
-    
-    config["games"][game_name] = {"save_dir": save_dir}
-    save_config(config)
-    logging.info(f"Jogo adicionado: {game_name} - {save_dir}")
-    print(f"{Fore.GREEN}Jogo adicionado com sucesso!{Style.RESET_ALL}")
+
+    if save_dir: # Only add if a directory was actually selected
+        config["games"][game_name] = {"save_dir": save_dir}
+        save_config(config)
+        logging.info(f"Jogo adicionado: {game_name} - {save_dir}")
+        print(f"{Fore.GREEN}Jogo adicionado com sucesso! Pasta: {save_dir}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.RED}Nenhuma pasta de save selecionada. Jogo não adicionado.{Style.RESET_ALL}")
+
     input("\nPressione Enter para continuar...")
+
 
 def remove_game(games):
     if not games:
         print("Nenhum jogo configurado!")
         return
-    
+
     print("Selecione um jogo para remover:")
     for i, name in enumerate(games.keys(), 1):
         print(f"{i}. {name}")
-    
+
     try:
         choice = int(input("Digite o número do jogo: ")) - 1
         game_name = list(games.keys())[choice]
-        
+
         config = load_config()
         del config["games"][game_name]
         save_config(config)
@@ -313,22 +401,22 @@ def remove_game(games):
         print(f"{Fore.GREEN}Jogo removido com sucesso!{Style.RESET_ALL}")
     except:
         print("Opção inválida!")
-    
+
     input("\nPressione Enter para continuar...")
 
 def edit_game(games):
     if not games:
         print("Nenhum jogo configurado!")
         return
-    
+
     print("Selecione um jogo para editar:")
     for i, name in enumerate(games.keys(), 1):
         print(f"{i}. {name}")
-    
+
     try:
         choice = int(input("Digite o número do jogo: ")) - 1
         game_name = list(games.keys())[choice]
-        
+
         config = load_config()
         webhook_status = "OK" if config.get("discord_webhook") else ""
         clear_screen()
@@ -336,7 +424,7 @@ def edit_game(games):
         print(f"{Fore.YELLOW}Editando: {game_name}{Style.RESET_ALL}")
         new_name = input(f"Novo nome [{game_name}]: ") or game_name
         new_dir = select_directory()
-        
+
         config["games"][new_name] = {"save_dir": new_dir}
         if new_name != game_name:
             del config["games"][game_name]
@@ -345,7 +433,7 @@ def edit_game(games):
         print(f"{Fore.GREEN}Jogo atualizado com sucesso!{Style.RESET_ALL}")
     except:
         print("Opção inválida!")
-    
+
     input("\nPressione Enter para continuar...")
 
 def monitoring_mode():
@@ -355,16 +443,16 @@ def monitoring_mode():
     print(generate_banner(webhook_status, show_full_pirate=True))
     print(f"{Fore.CYAN}Modo de Monitoramento Ativo{Style.RESET_ALL}")
     print(f"{Fore.YELLOW}Pressione 'q' para sair do monitoramento.{Style.RESET_ALL}")
-    
+
     webhook_url = config.get("discord_webhook")
     games = config.get("games", {})
-    
+
     if not webhook_url:
         logging.error("Webhook não configurado ao iniciar monitoramento")
         print(f"{Fore.RED}Erro: Webhook não configurado!{Style.RESET_ALL}")
         input("\nPressione Enter para voltar...")
         return
-    
+
     logging.info("Monitoramento iniciado")
     try:
         while True:
@@ -373,18 +461,18 @@ def monitoring_mode():
                 if not os.path.exists(save_dir):
                     logging.warning(f"Pasta de save não encontrada: {save_dir}")
                     continue
-                
+
                 print(f"\n{Fore.BLUE}[*]{Style.RESET_ALL} Verificando saves para {game_name}...")
                 zip_path = create_backup(game_name, save_dir)
-                
+
                 if zip_path and send_to_discord(zip_path, webhook_url):
                     print(f"{Fore.GREEN}[+]{Style.RESET_ALL} Backup enviado com sucesso para {game_name}")
                 elif zip_path:
                     print(f"{Fore.RED}[-]{Style.RESET_ALL} Falha ao enviar backup para {game_name}")
-                
+
                 if zip_path:
                     shutil.rmtree(os.path.dirname(zip_path), ignore_errors=True)
-            
+
             print(f"\n{Fore.YELLOW}[!]{Style.RESET_ALL} Aguardando mudanças... (Pressione 'q' para sair)")
             for _ in range(300):
                 if keyboard.is_pressed('q'):
@@ -400,7 +488,7 @@ def monitoring_mode():
 def main():
     while True:
         choice = main_menu()
-        
+
         if choice == '1':
             webhook_menu()
         elif choice == '2':
